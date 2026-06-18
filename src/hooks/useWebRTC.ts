@@ -11,8 +11,7 @@ function isIceConnected(pc: RTCPeerConnection | null): boolean {
   )
 }
 
-function isUselessCandidate(candidate: string): boolean {
-  // Safari mDNS candidates break connections across networks
+function shouldSkipOutgoingCandidate(candidate: string): boolean {
   return candidate.includes('.local')
 }
 
@@ -43,6 +42,7 @@ export function useWebRTC(
       config: { broadcast: { self: false } },
     })
     let offerRetryTimer: number | null = null
+    let recoveryTimer: number | null = null
     let signalChain = Promise.resolve()
     let channelReady = false
     let outboundQueue: SignalPayload[] = []
@@ -50,13 +50,14 @@ export function useWebRTC(
     let iceReceived = 0
     let iceSkipped = 0
     let iceRestartCount = 0
+    let useRelayOnly = false
     let lastIceState = ''
     let lastConnState = ''
     let lastSigState = ''
     let peerPresent = false
     let iceWasConnected = false
     let makingOffer = false
-    let ignoreOffer = false
+    let recovering = false
     let pendingIce: RTCIceCandidateInit[] = []
 
     setError(null)
@@ -68,17 +69,37 @@ export function useWebRTC(
       channelReady,
       peerPresent,
       iceWasConnected,
+      useRelayOnly,
       connected: isIceConnected(pcRef.current),
       signalingState: pcRef.current?.signalingState ?? 'none',
       iceState: pcRef.current?.iceConnectionState ?? 'none',
       connState: pcRef.current?.connectionState ?? 'none',
       pendingIce: pendingIce.length,
       iceRestartCount,
+      iceSent,
+      iceReceived,
     })
 
     const syncConnected = () => {
-      const ok = isIceConnected(pcRef.current)
-      setConnected(ok)
+      setConnected(isIceConnected(pcRef.current))
+    }
+
+    const clearRecoveryTimer = () => {
+      if (recoveryTimer != null) {
+        window.clearTimeout(recoveryTimer)
+        recoveryTimer = null
+      }
+    }
+
+    const scheduleRecovery = (reason: string) => {
+      if (!active || iceWasConnected || isIceConnected(pcRef.current) || recovering) return
+      clearRecoveryTimer()
+      recoveryTimer = window.setTimeout(() => {
+        recoveryTimer = null
+        if (!active || iceWasConnected || isIceConnected(pcRef.current)) return
+        diag('RTC', `recovering (${reason})`, snapshot())
+        void attemptRecovery()
+      }, 1500)
     }
 
     diag('RTC', 'session starting', { lobbyId, playerId, isHost })
@@ -133,54 +154,30 @@ export function useWebRTC(
       }
     }
 
-    const restartIce = async () => {
-      if (!active || !isHostRef.current || iceRestartCount >= MAX_ICE_RESTARTS) {
-        if (iceRestartCount >= MAX_ICE_RESTARTS && active) {
-          diag('RTC', 'ICE restart limit reached — giving up', snapshot())
-          setError('Video connection failed. Try leaving and rejoining.')
+    const attachLocalTracks = (pc: RTCPeerConnection) => {
+      const stream = localStreamRef.current
+      if (!stream) return
+      for (const track of stream.getTracks()) {
+        if (!pc.getSenders().some((s) => s.track?.id === track.id)) {
+          pc.addTrack(track, stream)
         }
-        return
-      }
-      iceRestartCount++
-      diag('RTC', `ICE restart #${iceRestartCount}`, snapshot())
-      const pc = ensurePeerConnection()
-      await attachLocalTracks(pc)
-      makingOffer = true
-      try {
-        const offer = await pc.createOffer({ iceRestart: true })
-        await pc.setLocalDescription(offer)
-        sendSignal({ type: 'offer', sdp: offer.sdp ?? '', from: playerId })
-      } finally {
-        makingOffer = false
       }
     }
 
-    const ensurePeerConnection = () => {
-      if (pcRef.current) return pcRef.current
-
-      diag('RTC', 'creating peer connection', { iceServers: ICE_SERVERS.length })
-      const pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-        iceCandidatePoolSize: 10,
-        bundlePolicy: 'max-bundle',
-      })
-      pcRef.current = pc
-
+    const bindPeerEvents = (pc: RTCPeerConnection) => {
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           const cand = event.candidate.candidate
-          if (isUselessCandidate(cand)) {
+          if (shouldSkipOutgoingCandidate(cand)) {
             iceSkipped++
-            if (iceSkipped === 1) {
-              diag('RTC', 'skipping mDNS .local ICE candidates (Safari)', snapshot())
-            }
             return
           }
           iceSent++
-          if (iceSent === 1 || iceSent % 10 === 0) {
+          if (iceSent <= 3 || iceSent % 10 === 0) {
             diag('RTC', `ICE sent (${iceSent})`, {
               type: event.candidate.type,
               protocol: event.candidate.protocol,
+              address: event.candidate.address,
               ...snapshot(),
             })
           }
@@ -190,7 +187,7 @@ export function useWebRTC(
             from: playerId,
           })
         } else {
-          diag('RTC', 'ICE gathering complete', { iceSent, iceSkipped, ...snapshot() })
+          diag('RTC', 'ICE gathering complete', snapshot())
         }
       }
 
@@ -201,18 +198,18 @@ export function useWebRTC(
         }
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
           iceWasConnected = true
+          recovering = false
+          clearRecoveryTimer()
           syncConnected()
         }
-        if (pc.iceConnectionState === 'failed') {
-          if (isHostRef.current && peerPresent) {
-            void restartIce()
-          } else if (!isHostRef.current) {
-            diag('RTC', 'ICE failed — asking host to restart', snapshot())
-            sendSignal({ type: 'hello', from: playerId })
+        if (
+          pc.iceConnectionState === 'failed' ||
+          pc.iceConnectionState === 'disconnected'
+        ) {
+          syncConnected()
+          if (!iceWasConnected && peerPresent) {
+            scheduleRecovery(`ice-${pc.iceConnectionState}`)
           }
-        }
-        if (pc.iceConnectionState === 'disconnected') {
-          syncConnected()
         }
       }
 
@@ -257,76 +254,117 @@ export function useWebRTC(
           diag('RTC', 'connection state', { state: pc.connectionState, ...snapshot() })
         }
         if (pc.connectionState === 'connected') syncConnected()
-        if (pc.connectionState === 'failed' && !iceWasConnected && peerPresent && active) {
-          if (iceRestartCount >= MAX_ICE_RESTARTS) {
-            setError('Video connection failed. Try leaving and rejoining.')
-          }
+        if (pc.connectionState === 'failed' && !iceWasConnected && peerPresent) {
+          scheduleRecovery('connection-failed')
         }
       }
+    }
 
+    const createPeerConnection = () => {
+      diag('RTC', 'creating peer connection', {
+        iceServers: ICE_SERVERS.length,
+        useRelayOnly,
+      })
+      const pc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS,
+        iceCandidatePoolSize: 10,
+        bundlePolicy: 'max-bundle',
+        ...(useRelayOnly ? { iceTransportPolicy: 'relay' as RTCIceTransportPolicy } : {}),
+      })
+      bindPeerEvents(pc)
+      attachLocalTracks(pc)
       return pc
     }
 
-    const attachLocalTracks = async (pc: RTCPeerConnection) => {
-      if (localStreamRef.current) {
-        const stream = localStreamRef.current
-        for (const track of stream.getTracks()) {
-          if (!pc.getSenders().some((s) => s.track?.id === track.id)) {
-            pc.addTrack(track, stream)
-          }
-        }
-        return stream
-      }
-
-      diag('RTC', 'requesting camera/mic')
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-        audio: true,
-      })
-
-      if (!active) {
-        stream.getTracks().forEach((t) => t.stop())
-        return null
-      }
-
-      localStreamRef.current = stream
-      setLocalStream(stream)
-      for (const track of stream.getTracks()) pc.addTrack(track, stream)
-      diag('RTC', 'local camera ready', {
-        streamId: stream.id,
-        tracks: stream.getTracks().map((t) => t.kind),
-      })
-      return stream
+    const replacePeerConnection = () => {
+      pcRef.current?.close()
+      pcRef.current = null
+      iceSent = 0
+      iceReceived = 0
+      iceSkipped = 0
+      pendingIce = []
+      lastIceState = ''
+      lastConnState = ''
+      lastSigState = ''
+      const pc = createPeerConnection()
+      pcRef.current = pc
+      return pc
     }
 
-    const sendOffer = async () => {
+    const ensurePeerConnection = () => {
+      if (!pcRef.current) {
+        pcRef.current = createPeerConnection()
+      }
+      return pcRef.current
+    }
+
+    const sendOffer = async (iceRestart = false) => {
       const pc = ensurePeerConnection()
-      await attachLocalTracks(pc)
+      attachLocalTracks(pc)
       makingOffer = true
       try {
-        const offer = await pc.createOffer()
+        const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined)
         await pc.setLocalDescription(offer)
         sendSignal({ type: 'offer', sdp: offer.sdp ?? '', from: playerId })
-        diag('RTC', 'offer created', snapshot())
+        diag('RTC', iceRestart ? 'ICE-restart offer created' : 'offer created', snapshot())
       } finally {
         makingOffer = false
+      }
+    }
+
+    const attemptRecovery = async () => {
+      if (!active || recovering || iceWasConnected || isIceConnected(pcRef.current)) return
+      if (!peerPresent) return
+
+      recovering = true
+      try {
+        if (!isHostRef.current) {
+          diag('RTC', 'asking host to recover', snapshot())
+          sendSignal({ type: 'hello', from: playerId })
+          return
+        }
+
+        if (iceRestartCount >= MAX_ICE_RESTARTS) {
+          diag('RTC', 'recovery limit reached', snapshot())
+          setError('Video connection failed. Try leaving and rejoining.')
+          return
+        }
+
+        iceRestartCount++
+
+        if (iceRestartCount >= 2 && !useRelayOnly) {
+          useRelayOnly = true
+          diag('RTC', 'switching to TURN-only mode', snapshot())
+          replacePeerConnection()
+          await sendOffer(false)
+          return
+        }
+
+        const pc = pcRef.current
+        if (pc?.remoteDescription && pc.signalingState === 'stable') {
+          diag('RTC', `ICE restart #${iceRestartCount}`, snapshot())
+          await sendOffer(true)
+          return
+        }
+
+        diag('RTC', `full re-offer #${iceRestartCount}`, snapshot())
+        replacePeerConnection()
+        await sendOffer(false)
+      } finally {
+        recovering = false
       }
     }
 
     const resendOffer = async () => {
       const pc = pcRef.current
       if (!pc) {
-        await sendOffer()
+        await sendOffer(false)
         return
       }
       if (pc.remoteDescription) return
-      await attachLocalTracks(pc)
+      attachLocalTracks(pc)
       if (pc.signalingState === 'stable') {
-        await sendOffer()
+        await sendOffer(false)
         return
       }
       if (pc.localDescription?.type === 'offer') {
@@ -339,13 +377,27 @@ export function useWebRTC(
       }
     }
 
+    const handleHello = async () => {
+      if (!isHostRef.current) return
+      const pc = pcRef.current
+      if (pc?.remoteDescription && !isIceConnected(pc)) {
+        await attemptRecovery()
+      } else {
+        await resendOffer()
+      }
+    }
+
     const handleSignal = async (payload: SignalPayload) => {
       if (payload.from === playerId) return
 
       if (payload.type === 'ice') {
         iceReceived++
-        if (iceReceived === 1 || iceReceived % 10 === 0) {
-          diag('RTC', `ICE received (${iceReceived})`, { from: payload.from, ...snapshot() })
+        if (iceReceived <= 3 || iceReceived % 10 === 0) {
+          diag('RTC', `ICE received (${iceReceived})`, {
+            from: payload.from,
+            candidate: payload.candidate.candidate?.slice(0, 80),
+            ...snapshot(),
+          })
         }
       } else {
         diag('RTC', `received ${payload.type}`, { from: payload.from, ...snapshot() })
@@ -353,18 +405,18 @@ export function useWebRTC(
 
       if (payload.type === 'hello') {
         peerPresent = true
-        if (isHostRef.current) await resendOffer()
+        await handleHello()
         return
       }
 
       const pc = ensurePeerConnection()
-      await attachLocalTracks(pc)
+      attachLocalTracks(pc)
 
       if (payload.type === 'offer') {
         peerPresent = true
-        const offerCollision = makingOffer || (pc.signalingState !== 'stable' && !isHostRef.current)
-        ignoreOffer = !isHostRef.current && offerCollision
-        if (ignoreOffer) {
+        const polite = !isHostRef.current
+        const offerCollision = makingOffer && polite
+        if (offerCollision) {
           diag('RTC', 'IGNORED offer (collision)', snapshot())
           return
         }
@@ -394,9 +446,6 @@ export function useWebRTC(
       }
 
       if (payload.type === 'ice' && payload.candidate) {
-        const cand = payload.candidate.candidate ?? ''
-        if (isUselessCandidate(cand)) return
-
         if (pc.remoteDescription) {
           try {
             await pc.addIceCandidate(payload.candidate)
@@ -418,8 +467,37 @@ export function useWebRTC(
         })
     }
 
+    const ensureLocalStream = async () => {
+      if (localStreamRef.current) return localStreamRef.current
+
+      diag('RTC', 'requesting camera/mic')
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+        audio: true,
+      })
+
+      if (!active) {
+        stream.getTracks().forEach((t) => t.stop())
+        return null
+      }
+
+      localStreamRef.current = stream
+      setLocalStream(stream)
+      diag('RTC', 'local camera ready', {
+        streamId: stream.id,
+        tracks: stream.getTracks().map((t) => t.kind),
+      })
+      return stream
+    }
+
     const start = async () => {
       try {
+        await ensureLocalStream()
+
         channel = client.channel(`webrtc:${lobbyId}`, {
           config: { broadcast: { self: false } },
         })
@@ -437,7 +515,7 @@ export function useWebRTC(
         sendSignal({ type: 'hello', from: playerId })
 
         if (isHostRef.current) {
-          await sendOffer()
+          await sendOffer(false)
           offerRetryTimer = window.setInterval(() => {
             if (!active || !isHostRef.current || isIceConnected(pcRef.current)) return
             if (pcRef.current?.remoteDescription) return
@@ -463,6 +541,7 @@ export function useWebRTC(
     return () => {
       diag('RTC', 'session cleanup', { lobbyId, playerId })
       active = false
+      clearRecoveryTimer()
       if (offerRetryTimer != null) window.clearInterval(offerRetryTimer)
       pcRef.current?.close()
       pcRef.current = null
