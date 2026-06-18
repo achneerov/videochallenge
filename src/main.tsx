@@ -9,6 +9,7 @@ debug('Main', 'app booting', {
   href: window.location.href,
   mediaDevices: Boolean(navigator.mediaDevices),
   rtcPeerConnection: Boolean(window.RTCPeerConnection),
+  build: document.querySelector('meta[name="app-build"]')?.getAttribute('content') ?? 'unknown',
 })
 
 createRoot(document.getElementById('root')!).render(
