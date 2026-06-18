@@ -66,38 +66,6 @@ export function BattleArena({
     useSmileDetection(localVideoRef, phase === 'active')
 
   useEffect(() => {
-    debug('BattleArena', 'phase/state', {
-      phase,
-      lobbyStatus: lobby.status,
-      countdown_starts_at: lobby.countdown_starts_at,
-      started_at: lobby.started_at,
-      countdownValue,
-      timeLeftMs,
-      liveScore,
-      finalScore,
-      modelsReady,
-      smileError,
-      meScore: me.smile_score,
-      opponentScore: opponent?.smile_score,
-      hasLocalStream: Boolean(localStream),
-      hasRemoteStream: Boolean(remoteStream),
-    })
-  }, [
-    phase,
-    lobby,
-    countdownValue,
-    timeLeftMs,
-    liveScore,
-    finalScore,
-    modelsReady,
-    smileError,
-    me.smile_score,
-    opponent?.smile_score,
-    localStream,
-    remoteStream,
-  ])
-
-  useEffect(() => {
     if (phase !== 'countdown' || !lobby.started_at) return
 
     const tick = () => {

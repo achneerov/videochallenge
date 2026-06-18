@@ -29,8 +29,6 @@ export function useSmileDetection(
   const samples = useRef<number[]>([])
   const frameCount = useRef(0)
 
-  debug('SmileDetection', 'hook render', { active, ready, liveScore, finalScore })
-
   useEffect(() => {
     let cancelled = false
     debug('SmileDetection', 'loading models...')

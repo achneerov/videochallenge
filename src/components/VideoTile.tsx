@@ -31,7 +31,9 @@ export function VideoTile({
           readyState: t.readyState,
         })),
       })
-      video.srcObject = stream
+      if (video.srcObject !== stream) {
+        video.srcObject = stream
+      }
       void video.play().catch((err) => {
         debug('VideoTile', `play() failed for "${label}"`, err)
       })
@@ -48,15 +50,14 @@ export function VideoTile({
         {score != null && <span className="video-tile__score">{score}</span>}
       </div>
       <div className="video-tile__frame">
-        {stream ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted={mirrored}
-            className={mirrored ? 'mirrored' : undefined}
-          />
-        ) : (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={mirrored ? 'mirrored' : undefined}
+        />
+        {!stream && (
           <div className="video-tile__placeholder">{placeholder}</div>
         )}
       </div>

@@ -23,7 +23,7 @@ export default function App() {
   } = useLobby(lobbyId, playerId)
 
   const isHost = Boolean(lobby && lobby.host_player_id === playerId)
-  const webrtcEnabled = Boolean(lobbyId && lobby && me && players.length === 2)
+  const webrtcEnabled = Boolean(lobbyId && lobby && me)
   const { localStream, remoteStream, connected, error: rtcError } = useWebRTC(
     lobbyId,
     playerId,

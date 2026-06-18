@@ -22,6 +22,7 @@ export interface LobbyPlayer {
 }
 
 export type SignalPayload =
+  | { type: 'hello'; from: string }
   | { type: 'offer'; sdp: string; from: string }
   | { type: 'answer'; sdp: string; from: string }
   | { type: 'ice'; candidate: RTCIceCandidateInit; from: string }

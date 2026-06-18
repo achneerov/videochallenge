@@ -1,4 +1,15 @@
+/** Verbose logs: dev server, or `localStorage.setItem('smile-battle-debug', '1')` in prod */
+export function isVerboseDebug(): boolean {
+  if (import.meta.env.DEV) return true
+  try {
+    return localStorage.getItem('smile-battle-debug') === '1'
+  } catch {
+    return false
+  }
+}
+
 export function debug(scope: string, message: string, data?: unknown): void {
+  if (!isVerboseDebug()) return
   const prefix = `[SmileBattle:${scope}]`
   if (data !== undefined) {
     console.log(prefix, message, data)
@@ -12,6 +23,7 @@ export function debugError(scope: string, message: string, error?: unknown): voi
 }
 
 export function debugWarn(scope: string, message: string, data?: unknown): void {
+  if (!isVerboseDebug()) return
   const prefix = `[SmileBattle:${scope}]`
   if (data !== undefined) {
     console.warn(prefix, message, data)

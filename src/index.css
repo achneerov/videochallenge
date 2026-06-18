@@ -211,6 +211,7 @@ input:focus {
 }
 
 .video-tile__frame {
+  position: relative;
   aspect-ratio: 4 / 3;
   border-radius: 18px;
   overflow: hidden;
@@ -219,6 +220,8 @@ input:focus {
 }
 
 .video-tile__frame video {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -229,6 +232,9 @@ input:focus {
 }
 
 .video-tile__placeholder {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   width: 100%;
   height: 100%;
   display: grid;
@@ -236,6 +242,7 @@ input:focus {
   color: rgba(255, 248, 240, 0.45);
   padding: 1rem;
   text-align: center;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .ready-status,

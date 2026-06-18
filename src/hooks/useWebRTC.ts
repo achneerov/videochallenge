@@ -17,8 +17,13 @@ export function useWebRTC(
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
+  const remoteStreamRef = useRef<MediaStream | null>(null)
+  const hadRemoteMediaRef = useRef(false)
+  const connectedRef = useRef(false)
+  const peerPresentRef = useRef(false)
   const makingOffer = useRef(false)
   const ignoreOffer = useRef(false)
+  const pendingIceRef = useRef<RTCIceCandidateInit[]>([])
   const isHostRef = useRef(isHost)
 
   isHostRef.current = isHost
@@ -31,6 +36,17 @@ export function useWebRTC(
     let channel = client.channel(`webrtc:${lobbyId}`, {
       config: { broadcast: { self: false } },
     })
+    let offerRetryTimer: number | null = null
+    let signalChain = Promise.resolve()
+
+    setError(null)
+    setRemoteStream(null)
+    setConnected(false)
+    connectedRef.current = false
+    hadRemoteMediaRef.current = false
+    peerPresentRef.current = false
+    remoteStreamRef.current = null
+    pendingIceRef.current = []
 
     debug('useWebRTC', 'starting session', { lobbyId, playerId, isHost })
 
@@ -41,6 +57,40 @@ export function useWebRTC(
         event: 'signal',
         payload,
       })
+    }
+
+    const flushPendingIce = async (pc: RTCPeerConnection) => {
+      if (!pc.remoteDescription) return
+      const pending = pendingIceRef.current
+      pendingIceRef.current = []
+      for (const candidate of pending) {
+        try {
+          await pc.addIceCandidate(candidate)
+        } catch (err) {
+          debugWarn('useWebRTC', 'queued ICE candidate failed', err)
+        }
+      }
+    }
+
+    const addRemoteTrack = (track: MediaStreamTrack) => {
+      if (!active) return
+      let stream = remoteStreamRef.current
+      if (!stream) {
+        stream = new MediaStream()
+        remoteStreamRef.current = stream
+      }
+      if (!stream.getTracks().some((t) => t.id === track.id)) {
+        stream.addTrack(track)
+      }
+      hadRemoteMediaRef.current = true
+      connectedRef.current = true
+      debug('useWebRTC', 'remote track received', {
+        kind: track.kind,
+        streamId: stream.id,
+        trackCount: stream.getTracks().length,
+      })
+      setRemoteStream(stream)
+      setConnected(true)
     }
 
     const ensurePeerConnection = () => {
@@ -62,6 +112,9 @@ export function useWebRTC(
 
       pc.oniceconnectionstatechange = () => {
         debug('useWebRTC', 'iceConnectionState', pc.iceConnectionState)
+        if (pc.iceConnectionState === 'failed' && !hadRemoteMediaRef.current) {
+          debugWarn('useWebRTC', 'ICE failed before remote media — host will retry offer')
+        }
       }
 
       pc.onsignalingstatechange = () => {
@@ -70,19 +123,33 @@ export function useWebRTC(
 
       pc.ontrack = (event) => {
         const [stream] = event.streams
-        if (stream && active) {
+        if (stream) {
+          remoteStreamRef.current = stream
+          hadRemoteMediaRef.current = true
+          connectedRef.current = true
           debug('useWebRTC', 'remote stream received', { streamId: stream.id })
           setRemoteStream(stream)
           setConnected(true)
+          return
         }
+        addRemoteTrack(event.track)
       }
 
       pc.onconnectionstatechange = () => {
         debug('useWebRTC', 'connectionState', pc.connectionState)
-        if (pc.connectionState === 'connected') setConnected(true)
+        if (pc.connectionState === 'connected') {
+          connectedRef.current = true
+          setConnected(true)
+        }
         if (pc.connectionState === 'failed') {
-          debugError('useWebRTC', 'peer connection FAILED')
-          setError('Video connection failed. Try leaving and rejoining.')
+          if (hadRemoteMediaRef.current) {
+            debugWarn('useWebRTC', 'connection dropped after remote media was flowing')
+          } else if (peerPresentRef.current && active) {
+            debugError('useWebRTC', 'peer connection FAILED before remote video')
+            setError('Video connection failed. Try leaving and rejoining.')
+          } else {
+            debugWarn('useWebRTC', 'connection failed before opponent joined signaling')
+          }
         }
       }
 
@@ -127,7 +194,7 @@ export function useWebRTC(
       return stream
     }
 
-    const createOffer = async () => {
+    const sendOffer = async () => {
       const pc = ensurePeerConnection()
       await attachLocalTracks(pc)
       makingOffer.current = true
@@ -141,13 +208,44 @@ export function useWebRTC(
       }
     }
 
+    const resendOffer = async () => {
+      const pc = pcRef.current
+      if (!pc) {
+        await sendOffer()
+        return
+      }
+      await attachLocalTracks(pc)
+      if (pc.signalingState === 'stable') {
+        await sendOffer()
+        return
+      }
+      if (pc.localDescription?.type === 'offer') {
+        sendSignal({
+          type: 'offer',
+          sdp: pc.localDescription.sdp ?? '',
+          from: playerId,
+        })
+        debug('useWebRTC', 'offer re-sent')
+      }
+    }
+
     const handleSignal = async (payload: SignalPayload) => {
       if (payload.from === playerId) return
+
+      if (payload.type === 'hello') {
+        peerPresentRef.current = true
+        debug('useWebRTC', 'peer hello received', { from: payload.from })
+        if (isHostRef.current) {
+          await resendOffer()
+        }
+        return
+      }
 
       const pc = ensurePeerConnection()
       await attachLocalTracks(pc)
 
       if (payload.type === 'offer') {
+        peerPresentRef.current = true
         const offerCollision = makingOffer.current || pc.signalingState !== 'stable'
         ignoreOffer.current = !isHostRef.current && offerCollision
         if (ignoreOffer.current) {
@@ -156,6 +254,7 @@ export function useWebRTC(
         }
 
         await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp })
+        await flushPendingIce(pc)
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         sendSignal({ type: 'answer', sdp: answer.sdp ?? '', from: playerId })
@@ -165,17 +264,32 @@ export function useWebRTC(
 
       if (payload.type === 'answer' && pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp })
+        await flushPendingIce(pc)
         debug('useWebRTC', 'remote answer applied')
         return
       }
 
       if (payload.type === 'ice' && payload.candidate) {
-        try {
-          await pc.addIceCandidate(payload.candidate)
-        } catch {
-          // ICE can arrive before remote description is set
+        if (pc.remoteDescription) {
+          try {
+            await pc.addIceCandidate(payload.candidate)
+          } catch (err) {
+            debugWarn('useWebRTC', 'ICE candidate failed', err)
+          }
+        } else {
+          pendingIceRef.current.push(payload.candidate)
         }
       }
+    }
+
+    const enqueueSignal = (payload: SignalPayload) => {
+      signalChain = signalChain
+        .then(() => handleSignal(payload))
+        .catch((err) => debugError('useWebRTC', 'signal handler failed', err))
+    }
+
+    const announcePresence = () => {
+      sendSignal({ type: 'hello', from: playerId })
     }
 
     const start = async () => {
@@ -185,15 +299,21 @@ export function useWebRTC(
         })
 
         channel.on('broadcast', { event: 'signal' }, ({ payload }) => {
-          void handleSignal(payload as SignalPayload)
+          enqueueSignal(payload as SignalPayload)
         })
 
         await channel.subscribe((status, err) => {
           debug('useWebRTC', 'signaling channel', { status, err })
         })
 
+        announcePresence()
+
         if (isHostRef.current) {
-          await createOffer()
+          await sendOffer()
+          offerRetryTimer = window.setInterval(() => {
+            if (!active || !isHostRef.current || connectedRef.current) return
+            void resendOffer()
+          }, 3000)
         }
       } catch (err) {
         debugError('useWebRTC', 'start failed', err)
@@ -212,10 +332,16 @@ export function useWebRTC(
     return () => {
       debug('useWebRTC', 'cleanup session', { lobbyId, playerId })
       active = false
+      if (offerRetryTimer != null) window.clearInterval(offerRetryTimer)
       pcRef.current?.close()
       pcRef.current = null
       localStreamRef.current?.getTracks().forEach((track) => track.stop())
       localStreamRef.current = null
+      remoteStreamRef.current = null
+      hadRemoteMediaRef.current = false
+      connectedRef.current = false
+      peerPresentRef.current = false
+      pendingIceRef.current = []
       setLocalStream(null)
       setRemoteStream(null)
       setConnected(false)

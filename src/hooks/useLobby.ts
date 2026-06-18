@@ -9,19 +9,48 @@ import { debugError } from '../lib/debug'
 import { supabase } from '../lib/supabase'
 import type { Lobby, LobbyPlayer } from '../types'
 
+function lobbySnapshot(lobby: Lobby | null): string {
+  if (!lobby) return ''
+  return [
+    lobby.status,
+    lobby.countdown_starts_at,
+    lobby.started_at,
+    lobby.host_player_id,
+  ].join('|')
+}
+
+function playersSnapshot(players: LobbyPlayer[]): string {
+  return players
+    .map(
+      (p) =>
+        `${p.player_id}:${p.slot}:${p.is_ready}:${p.smile_score}:${p.display_name}`,
+    )
+    .join('|')
+}
+
 export function useLobby(lobbyId: string | null, playerId: string) {
   const [lobby, setLobby] = useState<Lobby | null>(null)
   const [players, setPlayers] = useState<LobbyPlayer[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const scoreSubmitted = useRef(false)
+  const lobbyStatusRef = useRef<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!lobbyId) return
     const state = await fetchLobbyState(lobbyId)
-    setLobby(state.lobby)
-    setPlayers(state.players)
+
+    setLobby((prev) =>
+      lobbySnapshot(prev) === lobbySnapshot(state.lobby) ? prev : state.lobby,
+    )
+    setPlayers((prev) =>
+      playersSnapshot(prev) === playersSnapshot(state.players)
+        ? prev
+        : state.players,
+    )
+
     if (state.lobby) {
+      lobbyStatusRef.current = state.lobby.status
       await maybeAdvanceLobby(state.lobby, state.players, playerId)
     }
   }, [lobbyId, playerId])
@@ -34,6 +63,7 @@ export function useLobby(lobbyId: string | null, playerId: string) {
 
     let active = true
     scoreSubmitted.current = false
+    lobbyStatusRef.current = null
 
     const load = async () => {
       try {
@@ -76,8 +106,8 @@ export function useLobby(lobbyId: string | null, playerId: string) {
       )
       .subscribe()
 
-    // Host-driven timers need a fallback if realtime is delayed
     const tick = window.setInterval(() => {
+      if (lobbyStatusRef.current === 'finished') return
       void refresh()
     }, 1000)
 
@@ -109,13 +139,14 @@ export function useLobby(lobbyId: string | null, playerId: string) {
       scoreSubmitted.current = true
       try {
         await submitSmileScore(lobbyId, playerId, score)
+        await refresh()
       } catch (err) {
         scoreSubmitted.current = false
         debugError('useLobby', 'reportScore failed', err)
         setError(err instanceof Error ? err.message : 'Could not save score')
       }
     },
-    [lobbyId, playerId],
+    [lobbyId, playerId, refresh],
   )
 
   const me = players.find((player) => player.player_id === playerId) ?? null
