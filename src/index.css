@@ -245,6 +245,11 @@ input:focus {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.video-tile__placeholder--overlay {
+  pointer-events: none;
+  background: transparent;
+}
+
 .ready-status,
 .hint {
   color: rgba(255, 248, 240, 0.65);
