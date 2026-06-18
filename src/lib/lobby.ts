@@ -210,54 +210,43 @@ export async function submitSmileScore(
 export async function maybeAdvanceLobby(
   lobby: Lobby,
   players: LobbyPlayer[],
+  actorPlayerId: string,
 ): Promise<void> {
   if (!supabase) return
+
+  // Only the lobby host advances state to avoid races between both clients
+  if (actorPlayerId !== lobby.host_player_id) return
 
   const bothReady =
     players.length === 2 && players.every((player) => player.is_ready)
   const now = Date.now()
 
-  debug('LobbyAPI', 'maybeAdvanceLobby check', {
-    lobbyId: lobby.id,
-    status: lobby.status,
-    playerCount: players.length,
-    bothReady,
-    countdown_starts_at: lobby.countdown_starts_at,
-    started_at: lobby.started_at,
-    now,
-  })
-
   if (lobby.status === 'waiting' && bothReady) {
-    debug('LobbyAPI', 'Advancing: waiting → countdown')
+    const gameStartAt = new Date(now + COUNTDOWN_DURATION_MS).toISOString()
+    debug('LobbyAPI', 'Advancing: waiting → countdown', { gameStartAt })
     const { error } = await supabase
       .from('lobbies')
       .update({
         status: 'countdown',
         countdown_starts_at: new Date().toISOString(),
+        started_at: gameStartAt,
       })
       .eq('id', lobby.id)
       .eq('status', 'waiting')
     if (error) debugError('LobbyAPI', 'Advance to countdown failed', error)
-    else debug('LobbyAPI', 'Advance to countdown success')
     return
   }
 
-  if (lobby.status === 'countdown' && lobby.countdown_starts_at) {
-    const countdownEnd =
-      new Date(lobby.countdown_starts_at).getTime() + COUNTDOWN_DURATION_MS
-    debug('LobbyAPI', 'Countdown tick', { countdownEnd, now, elapsed: now - countdownEnd })
-    if (now >= countdownEnd) {
+  if (lobby.status === 'countdown' && lobby.started_at) {
+    const gameStart = new Date(lobby.started_at).getTime()
+    if (now >= gameStart) {
       debug('LobbyAPI', 'Advancing: countdown → active')
       const { error } = await supabase
         .from('lobbies')
-        .update({
-          status: 'active',
-          started_at: new Date().toISOString(),
-        })
+        .update({ status: 'active' })
         .eq('id', lobby.id)
         .eq('status', 'countdown')
       if (error) debugError('LobbyAPI', 'Advance to active failed', error)
-      else debug('LobbyAPI', 'Advance to active success')
     }
     return
   }
@@ -265,7 +254,6 @@ export async function maybeAdvanceLobby(
   if (lobby.status === 'active' && lobby.started_at) {
     const gameEnd =
       new Date(lobby.started_at).getTime() + CHALLENGE_DURATION_MS
-    debug('LobbyAPI', 'Active tick', { gameEnd, now, elapsed: now - gameEnd })
     if (now >= gameEnd) {
       debug('LobbyAPI', 'Advancing: active → finished')
       const { error } = await supabase
@@ -274,7 +262,6 @@ export async function maybeAdvanceLobby(
         .eq('id', lobby.id)
         .eq('status', 'active')
       if (error) debugError('LobbyAPI', 'Advance to finished failed', error)
-      else debug('LobbyAPI', 'Advance to finished success')
     }
   }
 }

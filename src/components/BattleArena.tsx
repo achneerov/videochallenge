@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CHALLENGE_DURATION_MS, COUNTDOWN_DURATION_MS } from '../lib/constants'
+import { CHALLENGE_DURATION_MS } from '../lib/constants'
 import { debug, debugWarn } from '../lib/debug'
 import { useSmileDetection } from '../hooks/useSmileDetection'
 import type { Lobby, LobbyPlayer } from '../types'
@@ -46,7 +46,7 @@ export function BattleArena({
   }, [localStream])
 
   const phase = useMemo(() => {
-    if (lobby.status === 'countdown' && lobby.countdown_starts_at) {
+    if (lobby.status === 'countdown' && lobby.started_at) {
       return 'countdown' as const
     }
     if (lobby.status === 'active' && lobby.started_at) {
@@ -98,18 +98,19 @@ export function BattleArena({
   ])
 
   useEffect(() => {
-    if (phase !== 'countdown' || !lobby.countdown_starts_at) return
+    if (phase !== 'countdown' || !lobby.started_at) return
 
     const tick = () => {
-      const elapsed = Date.now() - new Date(lobby.countdown_starts_at!).getTime()
-      const remaining = Math.ceil((COUNTDOWN_DURATION_MS - elapsed) / 1000)
+      const remaining = Math.ceil(
+        (new Date(lobby.started_at!).getTime() - Date.now()) / 1000,
+      )
       setCountdownValue(Math.max(remaining, 0))
     }
 
     tick()
     const interval = window.setInterval(tick, 100)
     return () => window.clearInterval(interval)
-  }, [phase, lobby.countdown_starts_at])
+  }, [phase, lobby.started_at])
 
   useEffect(() => {
     if (phase !== 'active' || !lobby.started_at) return

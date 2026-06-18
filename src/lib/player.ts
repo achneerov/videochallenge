@@ -9,8 +9,6 @@ export function getPlayerId(): string {
     id = crypto.randomUUID()
     localStorage.setItem(PLAYER_ID_KEY, id)
     debug('Player', 'generated new playerId', id)
-  } else {
-    debug('Player', 'loaded existing playerId', id)
   }
   return id
 }
