@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { debug } from '../lib/debug'
 
 interface VideoTileProps {
   stream: MediaStream | null
@@ -20,8 +21,25 @@ export function VideoTile({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    video.srcObject = stream
-  }, [stream])
+
+    if (stream) {
+      debug('VideoTile', `attaching stream for "${label}"`, {
+        streamId: stream.id,
+        tracks: stream.getTracks().map((t) => ({
+          kind: t.kind,
+          enabled: t.enabled,
+          readyState: t.readyState,
+        })),
+      })
+      video.srcObject = stream
+      void video.play().catch((err) => {
+        debug('VideoTile', `play() failed for "${label}"`, err)
+      })
+    } else {
+      debug('VideoTile', `no stream for "${label}" — showing placeholder`)
+      video.srcObject = null
+    }
+  }, [stream, label])
 
   return (
     <div className="video-tile">

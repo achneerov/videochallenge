@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+import { debug } from '../lib/debug'
 import { VideoTile } from './VideoTile'
 import type { Lobby, LobbyPlayer } from '../types'
 
@@ -26,6 +28,22 @@ export function WaitingRoom({
   onLeave,
   error,
 }: WaitingRoomProps) {
+  useEffect(() => {
+    debug('WaitingRoom', 'render state', {
+      code: lobby.code,
+      status: lobby.status,
+      playerCount: players.length,
+      me: { name: me.display_name, ready: me.is_ready, slot: me.slot },
+      opponent: opponent
+        ? { name: opponent.display_name, ready: opponent.is_ready, slot: opponent.slot }
+        : null,
+      connected,
+      hasLocalStream: Boolean(localStream),
+      hasRemoteStream: Boolean(remoteStream),
+      error,
+    })
+  }, [lobby, me, players, opponent, connected, localStream, remoteStream, error])
+
   return (
     <div className="panel lobby-panel">
       <div className="lobby-top">
@@ -33,7 +51,13 @@ export function WaitingRoom({
           <p className="eyebrow">Lobby code</p>
           <h2 className="lobby-code">{lobby.code}</h2>
         </div>
-        <button className="btn ghost" onClick={onLeave}>
+        <button
+          className="btn ghost"
+          onClick={() => {
+            debug('WaitingRoom', 'leave clicked')
+            onLeave()
+          }}
+        >
           Leave
         </button>
       </div>
@@ -65,7 +89,10 @@ export function WaitingRoom({
       <div className="ready-row">
         <button
           className={`btn ${me.is_ready ? 'secondary' : 'primary'}`}
-          onClick={() => onReady(!me.is_ready)}
+          onClick={() => {
+            debug('WaitingRoom', 'ready toggle', { current: me.is_ready, next: !me.is_ready })
+            onReady(!me.is_ready)
+          }}
           disabled={players.length < 2}
         >
           {me.is_ready ? 'Cancel ready' : 'Ready to smile'}

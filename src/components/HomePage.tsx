@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { createLobby, joinLobby } from '../lib/lobby'
+import { debug, debugError } from '../lib/debug'
 import { getSavedDisplayName, saveDisplayName } from '../lib/player'
 import { isSupabaseConfigured } from '../lib/supabase'
 
@@ -14,9 +15,12 @@ export function HomePage({ playerId, onEnterLobby }: HomePageProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  debug('HomePage', 'render', { playerId, isSupabaseConfigured })
+
   const trimmedName = name.trim()
 
   const handleCreate = async () => {
+    debug('HomePage', 'create clicked', { trimmedName, playerId })
     if (!trimmedName) {
       setError('Enter your name first')
       return
@@ -26,8 +30,10 @@ export function HomePage({ playerId, onEnterLobby }: HomePageProps) {
     try {
       saveDisplayName(trimmedName)
       const { lobby } = await createLobby(playerId, trimmedName)
+      debug('HomePage', 'create success, entering lobby', lobby.id)
       onEnterLobby(lobby.id)
     } catch (err) {
+      debugError('HomePage', 'create failed', err)
       setError(err instanceof Error ? err.message : 'Could not create lobby')
     } finally {
       setLoading(false)
@@ -35,6 +41,7 @@ export function HomePage({ playerId, onEnterLobby }: HomePageProps) {
   }
 
   const handleJoin = async () => {
+    debug('HomePage', 'join clicked', { trimmedName, joinCode, playerId })
     if (!trimmedName) {
       setError('Enter your name first')
       return
@@ -48,8 +55,10 @@ export function HomePage({ playerId, onEnterLobby }: HomePageProps) {
     try {
       saveDisplayName(trimmedName)
       const { lobby } = await joinLobby(joinCode, playerId, trimmedName)
+      debug('HomePage', 'join success, entering lobby', lobby.id)
       onEnterLobby(lobby.id)
     } catch (err) {
+      debugError('HomePage', 'join failed', err)
       setError(err instanceof Error ? err.message : 'Could not join lobby')
     } finally {
       setLoading(false)

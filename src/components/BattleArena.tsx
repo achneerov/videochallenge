@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CHALLENGE_DURATION_MS, COUNTDOWN_DURATION_MS } from '../lib/constants'
+import { debug, debugWarn } from '../lib/debug'
 import { useSmileDetection } from '../hooks/useSmileDetection'
 import type { Lobby, LobbyPlayer } from '../types'
 import { VideoTile } from './VideoTile'
@@ -27,8 +28,21 @@ export function BattleArena({
 
   useEffect(() => {
     const video = localVideoRef.current
-    if (!video || !localStream) return
+    if (!video || !localStream) {
+      debug('BattleArena', 'local video attach skipped', {
+        hasVideo: Boolean(video),
+        hasStream: Boolean(localStream),
+      })
+      return
+    }
+    debug('BattleArena', 'attaching local stream to video', {
+      streamId: localStream.id,
+      tracks: localStream.getTracks().map((t) => t.kind),
+    })
     video.srcObject = localStream
+    void video.play().catch((err) => {
+      debugWarn('BattleArena', 'local video play() failed', err)
+    })
   }, [localStream])
 
   const phase = useMemo(() => {
@@ -48,10 +62,40 @@ export function BattleArena({
   const [timeLeftMs, setTimeLeftMs] = useState(CHALLENGE_DURATION_MS)
   const scoreReported = useRef(false)
 
-  const { liveScore, finalScore, ready: modelsReady } = useSmileDetection(
-    localVideoRef,
-    phase === 'active',
-  )
+  const { liveScore, finalScore, ready: modelsReady, error: smileError } =
+    useSmileDetection(localVideoRef, phase === 'active')
+
+  useEffect(() => {
+    debug('BattleArena', 'phase/state', {
+      phase,
+      lobbyStatus: lobby.status,
+      countdown_starts_at: lobby.countdown_starts_at,
+      started_at: lobby.started_at,
+      countdownValue,
+      timeLeftMs,
+      liveScore,
+      finalScore,
+      modelsReady,
+      smileError,
+      meScore: me.smile_score,
+      opponentScore: opponent?.smile_score,
+      hasLocalStream: Boolean(localStream),
+      hasRemoteStream: Boolean(remoteStream),
+    })
+  }, [
+    phase,
+    lobby,
+    countdownValue,
+    timeLeftMs,
+    liveScore,
+    finalScore,
+    modelsReady,
+    smileError,
+    me.smile_score,
+    opponent?.smile_score,
+    localStream,
+    remoteStream,
+  ])
 
   useEffect(() => {
     if (phase !== 'countdown' || !lobby.countdown_starts_at) return
@@ -84,8 +128,12 @@ export function BattleArena({
     if (phase !== 'finished') return
 
     const submit = (score: number) => {
-      if (scoreReported.current) return
+      if (scoreReported.current) {
+        debug('BattleArena', 'score already reported, skipping', { score })
+        return
+      }
       scoreReported.current = true
+      debug('BattleArena', 'submitting final score', { score })
       onScoreFinalized(score)
     }
 
@@ -94,6 +142,9 @@ export function BattleArena({
       return
     }
 
+    debug('BattleArena', 'finalScore null, waiting 800ms fallback with liveScore', {
+      liveScore,
+    })
     const timeout = window.setTimeout(() => submit(liveScore), 800)
     return () => window.clearTimeout(timeout)
   }, [phase, finalScore, liveScore, onScoreFinalized])
@@ -122,7 +173,13 @@ export function BattleArena({
             {phase === 'finished' && 'Results'}
           </h2>
         </div>
-        <button className="btn ghost" onClick={onLeave}>
+        <button
+          className="btn ghost"
+          onClick={() => {
+            debug('BattleArena', 'leave clicked')
+            onLeave()
+          }}
+        >
           Leave
         </button>
       </div>
@@ -151,6 +208,7 @@ export function BattleArena({
           {!modelsReady && phase === 'active' && (
             <p className="hint">Loading smile detector…</p>
           )}
+          {smileError && <p className="error-text">{smileError}</p>}
         </div>
 
         <VideoTile

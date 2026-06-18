@@ -1,4 +1,5 @@
 import { COUNTDOWN_DURATION_MS, CHALLENGE_DURATION_MS } from './constants'
+import { debug, debugError } from './debug'
 import { supabase } from './supabase'
 import type { Lobby, LobbyPlayer } from '../types'
 
@@ -15,10 +16,13 @@ export async function createLobby(
   playerId: string,
   displayName: string,
 ): Promise<{ lobby: Lobby; player: LobbyPlayer }> {
+  debug('LobbyAPI', 'createLobby called', { playerId, displayName })
   if (!supabase) throw new Error('Supabase is not configured')
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = generateLobbyCode()
+    debug('LobbyAPI', `createLobby attempt ${attempt + 1}`, { code })
+
     const { data: lobby, error: lobbyError } = await supabase
       .from('lobbies')
       .insert({
@@ -30,9 +34,12 @@ export async function createLobby(
       .single()
 
     if (lobbyError) {
+      debugError('LobbyAPI', 'createLobby insert lobbies failed', lobbyError)
       if (lobbyError.code === '23505') continue
       throw lobbyError
     }
+
+    debug('LobbyAPI', 'Lobby row created', lobby)
 
     const { data: player, error: playerError } = await supabase
       .from('lobby_players')
@@ -45,7 +52,12 @@ export async function createLobby(
       .select()
       .single()
 
-    if (playerError) throw playerError
+    if (playerError) {
+      debugError('LobbyAPI', 'createLobby insert player failed', playerError)
+      throw playerError
+    }
+
+    debug('LobbyAPI', 'createLobby success', { lobby, player })
     return { lobby, player }
   }
 
@@ -57,6 +69,7 @@ export async function joinLobby(
   playerId: string,
   displayName: string,
 ): Promise<{ lobby: Lobby; player: LobbyPlayer }> {
+  debug('LobbyAPI', 'joinLobby called', { code, playerId, displayName })
   if (!supabase) throw new Error('Supabase is not configured')
 
   const normalized = code.trim().toUpperCase()
@@ -66,24 +79,42 @@ export async function joinLobby(
     .eq('code', normalized)
     .maybeSingle()
 
-  if (lobbyError) throw lobbyError
-  if (!lobby) throw new Error('Lobby not found')
-  if (lobby.status !== 'waiting') throw new Error('This game already started')
+  if (lobbyError) {
+    debugError('LobbyAPI', 'joinLobby fetch lobby failed', lobbyError)
+    throw lobbyError
+  }
+  if (!lobby) {
+    debug('LobbyAPI', 'joinLobby lobby not found', { normalized })
+    throw new Error('Lobby not found')
+  }
+  if (lobby.status !== 'waiting') {
+    debug('LobbyAPI', 'joinLobby game already started', { status: lobby.status })
+    throw new Error('This game already started')
+  }
+
+  debug('LobbyAPI', 'joinLobby found lobby', lobby)
 
   const { data: existingPlayers, error: playersError } = await supabase
     .from('lobby_players')
     .select()
     .eq('lobby_id', lobby.id)
 
-  if (playersError) throw playersError
+  if (playersError) {
+    debugError('LobbyAPI', 'joinLobby fetch players failed', playersError)
+    throw playersError
+  }
+
+  debug('LobbyAPI', 'joinLobby existing players', existingPlayers)
 
   const alreadyJoined = existingPlayers?.some((p) => p.player_id === playerId)
   if (alreadyJoined) {
     const self = existingPlayers!.find((p) => p.player_id === playerId)!
+    debug('LobbyAPI', 'joinLobby player already in lobby', self)
     return { lobby, player: self }
   }
 
   if ((existingPlayers?.length ?? 0) >= 2) {
+    debug('LobbyAPI', 'joinLobby lobby full')
     throw new Error('Lobby is full')
   }
 
@@ -98,7 +129,12 @@ export async function joinLobby(
     .select()
     .single()
 
-  if (playerError) throw playerError
+  if (playerError) {
+    debugError('LobbyAPI', 'joinLobby insert player failed', playerError)
+    throw playerError
+  }
+
+  debug('LobbyAPI', 'joinLobby success', { lobby, player })
   return { lobby, player }
 }
 
@@ -106,16 +142,25 @@ export async function fetchLobbyState(lobbyId: string): Promise<{
   lobby: Lobby | null
   players: LobbyPlayer[]
 }> {
-  if (!supabase) return { lobby: null, players: [] }
+  if (!supabase) {
+    debug('LobbyAPI', 'fetchLobbyState skipped — no supabase client')
+    return { lobby: null, players: [] }
+  }
 
-  const [{ data: lobby }, { data: players }] = await Promise.all([
-    supabase.from('lobbies').select().eq('id', lobbyId).maybeSingle(),
-    supabase
-      .from('lobby_players')
-      .select()
-      .eq('lobby_id', lobbyId)
-      .order('slot'),
-  ])
+  const [{ data: lobby, error: lobbyError }, { data: players, error: playersError }] =
+    await Promise.all([
+      supabase.from('lobbies').select().eq('id', lobbyId).maybeSingle(),
+      supabase
+        .from('lobby_players')
+        .select()
+        .eq('lobby_id', lobbyId)
+        .order('slot'),
+    ])
+
+  if (lobbyError) debugError('LobbyAPI', 'fetchLobbyState lobby error', lobbyError)
+  if (playersError) debugError('LobbyAPI', 'fetchLobbyState players error', playersError)
+
+  debug('LobbyAPI', 'fetchLobbyState result', { lobby, players })
 
   return { lobby, players: players ?? [] }
 }
@@ -125,6 +170,7 @@ export async function setPlayerReady(
   playerId: string,
   ready: boolean,
 ): Promise<void> {
+  debug('LobbyAPI', 'setPlayerReady', { lobbyId, playerId, ready })
   if (!supabase) throw new Error('Supabase is not configured')
 
   const { error } = await supabase
@@ -133,7 +179,11 @@ export async function setPlayerReady(
     .eq('lobby_id', lobbyId)
     .eq('player_id', playerId)
 
-  if (error) throw error
+  if (error) {
+    debugError('LobbyAPI', 'setPlayerReady failed', error)
+    throw error
+  }
+  debug('LobbyAPI', 'setPlayerReady success')
 }
 
 export async function submitSmileScore(
@@ -141,6 +191,7 @@ export async function submitSmileScore(
   playerId: string,
   score: number,
 ): Promise<void> {
+  debug('LobbyAPI', 'submitSmileScore', { lobbyId, playerId, score })
   if (!supabase) throw new Error('Supabase is not configured')
 
   const { error } = await supabase
@@ -149,7 +200,11 @@ export async function submitSmileScore(
     .eq('lobby_id', lobbyId)
     .eq('player_id', playerId)
 
-  if (error) throw error
+  if (error) {
+    debugError('LobbyAPI', 'submitSmileScore failed', error)
+    throw error
+  }
+  debug('LobbyAPI', 'submitSmileScore success')
 }
 
 export async function maybeAdvanceLobby(
@@ -162,8 +217,19 @@ export async function maybeAdvanceLobby(
     players.length === 2 && players.every((player) => player.is_ready)
   const now = Date.now()
 
+  debug('LobbyAPI', 'maybeAdvanceLobby check', {
+    lobbyId: lobby.id,
+    status: lobby.status,
+    playerCount: players.length,
+    bothReady,
+    countdown_starts_at: lobby.countdown_starts_at,
+    started_at: lobby.started_at,
+    now,
+  })
+
   if (lobby.status === 'waiting' && bothReady) {
-    await supabase
+    debug('LobbyAPI', 'Advancing: waiting → countdown')
+    const { error } = await supabase
       .from('lobbies')
       .update({
         status: 'countdown',
@@ -171,14 +237,18 @@ export async function maybeAdvanceLobby(
       })
       .eq('id', lobby.id)
       .eq('status', 'waiting')
+    if (error) debugError('LobbyAPI', 'Advance to countdown failed', error)
+    else debug('LobbyAPI', 'Advance to countdown success')
     return
   }
 
   if (lobby.status === 'countdown' && lobby.countdown_starts_at) {
     const countdownEnd =
       new Date(lobby.countdown_starts_at).getTime() + COUNTDOWN_DURATION_MS
+    debug('LobbyAPI', 'Countdown tick', { countdownEnd, now, elapsed: now - countdownEnd })
     if (now >= countdownEnd) {
-      await supabase
+      debug('LobbyAPI', 'Advancing: countdown → active')
+      const { error } = await supabase
         .from('lobbies')
         .update({
           status: 'active',
@@ -186,6 +256,8 @@ export async function maybeAdvanceLobby(
         })
         .eq('id', lobby.id)
         .eq('status', 'countdown')
+      if (error) debugError('LobbyAPI', 'Advance to active failed', error)
+      else debug('LobbyAPI', 'Advance to active success')
     }
     return
   }
@@ -193,12 +265,16 @@ export async function maybeAdvanceLobby(
   if (lobby.status === 'active' && lobby.started_at) {
     const gameEnd =
       new Date(lobby.started_at).getTime() + CHALLENGE_DURATION_MS
+    debug('LobbyAPI', 'Active tick', { gameEnd, now, elapsed: now - gameEnd })
     if (now >= gameEnd) {
-      await supabase
+      debug('LobbyAPI', 'Advancing: active → finished')
+      const { error } = await supabase
         .from('lobbies')
         .update({ status: 'finished' })
         .eq('id', lobby.id)
         .eq('status', 'active')
+      if (error) debugError('LobbyAPI', 'Advance to finished failed', error)
+      else debug('LobbyAPI', 'Advance to finished success')
     }
   }
 }
@@ -207,20 +283,29 @@ export async function leaveLobby(
   lobbyId: string,
   playerId: string,
 ): Promise<void> {
+  debug('LobbyAPI', 'leaveLobby', { lobbyId, playerId })
   if (!supabase) return
 
-  await supabase
+  const { error: deleteError } = await supabase
     .from('lobby_players')
     .delete()
     .eq('lobby_id', lobbyId)
     .eq('player_id', playerId)
 
-  const { data: remaining } = await supabase
+  if (deleteError) debugError('LobbyAPI', 'leaveLobby delete player failed', deleteError)
+
+  const { data: remaining, error: remainingError } = await supabase
     .from('lobby_players')
     .select('id')
     .eq('lobby_id', lobbyId)
 
+  if (remainingError) debugError('LobbyAPI', 'leaveLobby count remaining failed', remainingError)
+
+  debug('LobbyAPI', 'leaveLobby remaining players', remaining)
+
   if (!remaining?.length) {
-    await supabase.from('lobbies').delete().eq('id', lobbyId)
+    debug('LobbyAPI', 'leaveLobby deleting empty lobby')
+    const { error } = await supabase.from('lobbies').delete().eq('id', lobbyId)
+    if (error) debugError('LobbyAPI', 'leaveLobby delete lobby failed', error)
   }
 }
