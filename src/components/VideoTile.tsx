@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { debug } from '../lib/debug'
+import { debug, diag } from '../lib/debug'
 
 interface VideoTileProps {
   stream: MediaStream | null
@@ -23,6 +23,14 @@ export function VideoTile({
     if (!video) return
 
     if (stream) {
+      diag('Video', `attaching stream for "${label}"`, {
+        streamId: stream.id,
+        tracks: stream.getTracks().map((t) => ({
+          kind: t.kind,
+          enabled: t.enabled,
+          readyState: t.readyState,
+        })),
+      })
       debug('VideoTile', `attaching stream for "${label}"`, {
         streamId: stream.id,
         tracks: stream.getTracks().map((t) => ({
@@ -35,10 +43,11 @@ export function VideoTile({
         video.srcObject = stream
       }
       void video.play().catch((err) => {
+        diag('Video', `play() failed for "${label}"`, err)
         debug('VideoTile', `play() failed for "${label}"`, err)
       })
     } else {
-      debug('VideoTile', `no stream for "${label}" — showing placeholder`)
+      diag('Video', `no stream for "${label}"`)
       video.srcObject = null
     }
   }, [stream, label])

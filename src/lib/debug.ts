@@ -32,6 +32,16 @@ export function debugWarn(scope: string, message: string, data?: unknown): void 
   }
 }
 
+/** Always-on low-volume logs for diagnosing WebRTC in production */
+export function diag(scope: string, message: string, data?: unknown): void {
+  const prefix = `[SmileBattle:${scope}]`
+  if (data !== undefined) {
+    console.info(prefix, message, data)
+  } else {
+    console.info(prefix, message)
+  }
+}
+
 export function maskSecret(value: string | undefined): string {
   if (!value) return '(missing)'
   if (value.length <= 12) return '***'

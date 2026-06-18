@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { debug } from '../lib/debug'
+import { useEffect, useRef } from 'react'
+import { debug, diag } from '../lib/debug'
 import { VideoTile } from './VideoTile'
 import type { Lobby, LobbyPlayer } from '../types'
 
@@ -28,7 +28,27 @@ export function WaitingRoom({
   onLeave,
   error,
 }: WaitingRoomProps) {
+  const videoStatusRef = useRef({
+    connected,
+    hasLocal: Boolean(localStream),
+    hasRemote: Boolean(remoteStream),
+  })
+
   useEffect(() => {
+    const prev = videoStatusRef.current
+    const next = {
+      connected,
+      hasLocal: Boolean(localStream),
+      hasRemote: Boolean(remoteStream),
+    }
+    if (
+      prev.connected !== next.connected ||
+      prev.hasLocal !== next.hasLocal ||
+      prev.hasRemote !== next.hasRemote
+    ) {
+      diag('Lobby', 'video status changed', { ...next, error })
+      videoStatusRef.current = next
+    }
     debug('WaitingRoom', 'render state', {
       code: lobby.code,
       status: lobby.status,
@@ -85,6 +105,13 @@ export function WaitingRoom({
           }
         />
       </div>
+
+      {players.length >= 1 && (
+        <p className="hint rtc-status">
+          Video debug — you: {localStream ? 'on' : 'off'} · opponent:{' '}
+          {remoteStream ? 'on' : 'off'} · link: {connected ? 'connected' : 'connecting…'}
+        </p>
+      )}
 
       <div className="ready-row">
         <button
