@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { ICE_SERVERS, MAX_ICE_RESTARTS } from '../lib/constants'
+import { MAX_ICE_RESTARTS } from '../lib/constants'
 import { debugError, debugWarn, diag } from '../lib/debug'
+import { resolveIceServers } from '../lib/ice'
 import { supabase } from '../lib/supabase'
 import type { SignalPayload } from '../types'
 
@@ -25,6 +26,7 @@ export function useWebRTC(
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [turnConfigured, setTurnConfigured] = useState(true)
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -46,11 +48,13 @@ export function useWebRTC(
     let signalChain = Promise.resolve()
     let channelReady = false
     let outboundQueue: SignalPayload[] = []
+    let iceServers: RTCIceServer[] = []
     let iceSent = 0
+    let relaySent = 0
     let iceReceived = 0
-    let iceSkipped = 0
     let iceRestartCount = 0
     let useRelayOnly = false
+    let peerRelayOnly = false
     let lastIceState = ''
     let lastConnState = ''
     let lastSigState = ''
@@ -70,6 +74,7 @@ export function useWebRTC(
       peerPresent,
       iceWasConnected,
       useRelayOnly,
+      peerRelayOnly,
       connected: isIceConnected(pcRef.current),
       signalingState: pcRef.current?.signalingState ?? 'none',
       iceState: pcRef.current?.iceConnectionState ?? 'none',
@@ -77,6 +82,7 @@ export function useWebRTC(
       pendingIce: pendingIce.length,
       iceRestartCount,
       iceSent,
+      relaySent,
       iceReceived,
     })
 
@@ -100,6 +106,13 @@ export function useWebRTC(
         diag('RTC', `recovering (${reason})`, snapshot())
         void attemptRecovery()
       }, 1500)
+    }
+
+    const enableRelayMode = (reason: string) => {
+      if (useRelayOnly) return
+      useRelayOnly = true
+      diag('RTC', `relay-only enabled (${reason})`, snapshot())
+      sendSignal({ type: 'relay', from: playerId })
     }
 
     diag('RTC', 'session starting', { lobbyId, playerId, isHost })
@@ -168,12 +181,12 @@ export function useWebRTC(
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           const cand = event.candidate.candidate
-          if (shouldSkipOutgoingCandidate(cand)) {
-            iceSkipped++
-            return
-          }
+          if (shouldSkipOutgoingCandidate(cand)) return
+
           iceSent++
-          if (iceSent <= 3 || iceSent % 10 === 0) {
+          if (event.candidate.type === 'relay') relaySent++
+
+          if (iceSent <= 5 || iceSent % 10 === 0) {
             diag('RTC', `ICE sent (${iceSent})`, {
               type: event.candidate.type,
               protocol: event.candidate.protocol,
@@ -188,6 +201,10 @@ export function useWebRTC(
           })
         } else {
           diag('RTC', 'ICE gathering complete', snapshot())
+          if (relaySent === 0 && peerPresent && !useRelayOnly) {
+            diag('RTC', 'no relay candidates — enabling relay-only on both peers', snapshot())
+            void attemptRecovery()
+          }
         }
       }
 
@@ -261,15 +278,16 @@ export function useWebRTC(
     }
 
     const createPeerConnection = () => {
+      const relayMode = useRelayOnly || peerRelayOnly
       diag('RTC', 'creating peer connection', {
-        iceServers: ICE_SERVERS.length,
-        useRelayOnly,
+        iceServers: iceServers.length,
+        useRelayOnly: relayMode,
       })
       const pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
+        iceServers,
         iceCandidatePoolSize: 10,
         bundlePolicy: 'max-bundle',
-        ...(useRelayOnly ? { iceTransportPolicy: 'relay' as RTCIceTransportPolicy } : {}),
+        ...(relayMode ? { iceTransportPolicy: 'relay' as RTCIceTransportPolicy } : {}),
       })
       bindPeerEvents(pc)
       attachLocalTracks(pc)
@@ -280,8 +298,8 @@ export function useWebRTC(
       pcRef.current?.close()
       pcRef.current = null
       iceSent = 0
+      relaySent = 0
       iceReceived = 0
-      iceSkipped = 0
       pendingIce = []
       lastIceState = ''
       lastConnState = ''
@@ -326,15 +344,16 @@ export function useWebRTC(
 
         if (iceRestartCount >= MAX_ICE_RESTARTS) {
           diag('RTC', 'recovery limit reached', snapshot())
-          setError('Video connection failed. Try leaving and rejoining.')
+          setError(
+            'Could not connect video. Check TURN is configured (VITE_METERED_API_KEY) and try again.',
+          )
           return
         }
 
         iceRestartCount++
 
-        if (iceRestartCount >= 2 && !useRelayOnly) {
-          useRelayOnly = true
-          diag('RTC', 'switching to TURN-only mode', snapshot())
+        if (!useRelayOnly) {
+          enableRelayMode('ice-failed')
           replacePeerConnection()
           await sendOffer(false)
           return
@@ -387,12 +406,24 @@ export function useWebRTC(
       }
     }
 
+    const handleRelay = async () => {
+      peerRelayOnly = true
+      if (!useRelayOnly) {
+        useRelayOnly = true
+        diag('RTC', 'peer requested relay-only — rebuilding connection', snapshot())
+        replacePeerConnection()
+        if (!isHostRef.current) {
+          sendSignal({ type: 'hello', from: playerId })
+        }
+      }
+    }
+
     const handleSignal = async (payload: SignalPayload) => {
       if (payload.from === playerId) return
 
       if (payload.type === 'ice') {
         iceReceived++
-        if (iceReceived <= 3 || iceReceived % 10 === 0) {
+        if (iceReceived <= 5 || iceReceived % 10 === 0) {
           diag('RTC', `ICE received (${iceReceived})`, {
             from: payload.from,
             candidate: payload.candidate.candidate?.slice(0, 80),
@@ -401,6 +432,12 @@ export function useWebRTC(
         }
       } else {
         diag('RTC', `received ${payload.type}`, { from: payload.from, ...snapshot() })
+      }
+
+      if (payload.type === 'relay') {
+        peerPresent = true
+        await handleRelay()
+        return
       }
 
       if (payload.type === 'hello') {
@@ -496,6 +533,16 @@ export function useWebRTC(
 
     const start = async () => {
       try {
+        const ice = await resolveIceServers()
+        iceServers = ice.servers
+        setTurnConfigured(ice.hasTurn)
+        if (!ice.hasTurn) {
+          diag('RTC', 'WARNING: no TURN servers — cross-network video will fail')
+          setError(
+            'TURN not configured. Add a free Metered API key (VITE_METERED_API_KEY) to enable remote video.',
+          )
+        }
+
         await ensureLocalStream()
 
         channel = client.channel(`webrtc:${lobbyId}`, {
@@ -555,5 +602,5 @@ export function useWebRTC(
     }
   }, [lobbyId, playerId, enabled])
 
-  return { localStream, remoteStream, connected, error }
+  return { localStream, remoteStream, connected, error, turnConfigured }
 }

@@ -24,7 +24,7 @@ export default function App() {
 
   const isHost = Boolean(lobby && lobby.host_player_id === playerId)
   const webrtcEnabled = Boolean(lobbyId && lobby && me)
-  const { localStream, remoteStream, connected, error: rtcError } = useWebRTC(
+  const { localStream, remoteStream, connected, error: rtcError, turnConfigured } = useWebRTC(
     lobbyId,
     playerId,
     isHost,
@@ -96,6 +96,7 @@ export default function App() {
           onReady={toggleReady}
           onLeave={handleLeave}
           error={error ?? rtcError}
+          turnConfigured={turnConfigured}
         />
       )}
     </main>

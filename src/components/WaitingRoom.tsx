@@ -14,6 +14,7 @@ interface WaitingRoomProps {
   onReady: (ready: boolean) => void
   onLeave: () => void
   error: string | null
+  turnConfigured: boolean
 }
 
 export function WaitingRoom({
@@ -27,6 +28,7 @@ export function WaitingRoom({
   onReady,
   onLeave,
   error,
+  turnConfigured,
 }: WaitingRoomProps) {
   const videoStatusRef = useRef({
     connected,
@@ -110,6 +112,15 @@ export function WaitingRoom({
         <p className="hint rtc-status">
           Video debug — you: {localStream ? 'on' : 'off'} · opponent:{' '}
           {remoteStream ? 'on' : 'off'} · link: {connected ? 'connected' : 'connecting…'}
+          {!turnConfigured && ' · TURN missing'}
+        </p>
+      )}
+
+      {!turnConfigured && (
+        <p className="error-text">
+          Remote video needs a TURN server. Sign up free at metered.ca/tools/openrelay, then add{' '}
+          <code>VITE_METERED_API_KEY</code> and <code>VITE_METERED_APP</code> to Cloudflare Pages env
+          vars and redeploy.
         </p>
       )}
 
